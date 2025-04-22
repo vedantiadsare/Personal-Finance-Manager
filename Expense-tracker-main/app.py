@@ -12,6 +12,12 @@ import io
 import csv
 from gemini_helper import analyze_transactions_csv
 import os, csv
+from flask import request, jsonify
+import re
+from datetime import datetime
+import dateparser
+
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -1090,54 +1096,65 @@ def delete_budget(category_id):
             connection.close()
 
 
-@app.route('/export-csv', methods=['GET'])
+def clean_date_string(spoken_date):
+    # Remove suffixes like 'st', 'nd', 'rd', 'th'
+    cleaned = re.sub(r'(\d{1,2})(st|nd|rd|th)', r'\1', spoken_date.lower()).strip()
+    return cleaned
+
+def parse_flexible_date(spoken_date):
+    cleaned_date = clean_date_string(spoken_date)
+    parsed = dateparser.parse(cleaned_date)
+    if not parsed:
+        raise ValueError(f"Could not parse date from '{spoken_date}'")
+    return parsed
+
+@app.route('/voice_transaction', methods=['POST'])
 @login_required
-def export_csv():
-    connection = get_db_connection()
-    if not connection:
-        flash('Database connection error', 'danger')
-        return redirect(url_for('transactions'))
-    
+def voice_transaction():
+    data = request.get_json()
+    text = data.get('text', '').lower()
+
     try:
+        match = re.search(r"(income|expense).*?(\d+(\.\d+)?).*?(rupees|rs|₹)?\s*for\s+(.*?)\s+on\s+(.*)", text)
+        if not match:
+            return jsonify({'success': False, 'message': 'Could not understand. Try saying: "Add expense of 500 rupees for groceries on April 21"'})
+
+        transaction_type = match.group(1)
+        amount = float(match.group(2))
+        description = match.group(5).strip()
+        spoken_date = clean_date_string(match.group(6).strip())  # Clean date here
+
+        date_obj = parse_flexible_date(spoken_date)
+        date_obj = date_obj.replace(year=datetime.now().year)
+        formatted_date = date_obj.strftime('%Y-%m-%d')
+
+        # Check and insert as before...
+        connection = get_db_connection()
         cursor = connection.cursor(dictionary=True)
         cursor.execute('''
-            SELECT t.amount, t.description, t.date, c.name as category_name, c.type as category_type
-            FROM transactions t
-            JOIN categories c ON t.category_id = c.id
-            WHERE t.user_id = %s
-            ORDER BY t.date DESC
-        ''', (current_user.id,))
-        transactions = cursor.fetchall()
+            SELECT * FROM categories 
+            WHERE user_id = %s AND name = %s AND type = %s
+        ''', (current_user.id, description.lower(), transaction_type))
+        category = cursor.fetchone()
 
-        # Create CSV in memory
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(['Date', 'Amount', 'Description', 'Category', 'Type'])  # Header
+        if not category:
+            return jsonify({'success': False, 'message': f'No matching category found for "{description}" and type "{transaction_type}". Please add it first.'})
 
-        for txn in transactions:
-            writer.writerow([
-                txn['date'].strftime('%Y-%m-%d') if txn['date'] else '',
-                txn['amount'],
-                txn['description'],
-                txn['category_name'],
-                txn['category_type']
-            ])
+        cursor.execute('''
+            INSERT INTO transactions (amount, description, date, user_id, category_id)
+            VALUES (%s, %s, %s, %s, %s)
+        ''', (amount, description, formatted_date, current_user.id, category['id']))
+        
+        connection.commit()
+        return jsonify({'success': True, 'message': 'Transaction added successfully via voice!'})
 
-        output.seek(0)
-
-        return Response(
-            output.getvalue(),
-            mimetype='text/csv',
-            headers={'Content-Disposition': 'attachment; filename=transactions.csv'}
-        )
     except Exception as e:
-        print(f"Error exporting CSV: {str(e)}")
-        flash('Error exporting CSV file.', 'danger')
-        return redirect(url_for('transactions'))
+        print(f"Voice transaction error: {str(e)}")
+        return jsonify({'success': False, 'message': f'Error processing voice input: {str(e)}'})
     finally:
-        if cursor:
+        if 'cursor' in locals():
             cursor.close()
-        if connection:
+        if 'connection' in locals():
             connection.close()
 
 
@@ -1166,16 +1183,27 @@ def suggestions():
         filepath = os.path.join("temp", filename)
         os.makedirs("temp", exist_ok=True)
 
-        with open(filepath, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['Amount', 'Description', 'Date', 'Category'])
-            for tx in transactions:
-                writer.writerow([tx['amount'], tx['description'], tx['date'], tx['category']])
-
-        # Analyze with Gemini
+        try:
+            with open(filepath, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['Amount', 'Description', 'Date', 'Category'])
+                for tx in transactions:
+                    writer.writerow([tx['amount'], tx['description'], tx['date'], tx['category']])
+            print(f"CSV file saved to: {os.path.abspath(filepath)}")
+            print(f"CSV file exists: {os.path.exists(filepath)}")
+        except Exception as e:
+            print("CSV writing error:", str(e))
+            flash("Failed to write transactions to CSV.", "danger")
+            return redirect(url_for('transactions'))
         
-        suggestions = analyze_transactions_csv(filepath)
-
+        try:
+            suggestions = analyze_transactions_csv(filepath)
+        except Exception as e:
+            print("Gemini analysis error:", str(e))
+            traceback.print_exc()
+            flash("Failed to analyze transactions with Gemini.", "danger")
+            return redirect(url_for('transactions'))
+                
         os.remove(filepath)  # Clean up
 
         return render_template('suggestions.html', suggestions=suggestions)

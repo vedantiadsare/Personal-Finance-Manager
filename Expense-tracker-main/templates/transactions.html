@@ -122,6 +122,9 @@
             <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#transactionModal">
                 <i class="fas fa-plus"></i> Add Transaction
             </button>
+            <button id="voiceTransactionBtn" class="btn btn-primary">
+            🎙️ Add Expense by Voice
+            </button>
         </div>
     </div>
     {% if transactions %}
@@ -177,8 +180,7 @@
         No transactions found. Add your first transaction using the button above.
     </div>
     {% endif %}
-    <a href="{{ url_for('export_csv') }}" class="btn btn-success">Download CSV</a>
-
+   
     <a href="{{ url_for('suggestions') }}" class="btn btn-success mb-3 float-end">
         💡 Get Savings Suggestions
     </a>
@@ -252,8 +254,101 @@
     </div>
 </div>
 
+<!-- Voice Recording Popup -->
+<div id="voiceRecordingPopup" class="position-fixed top-0 start-50 translate-middle-x p-3" style="z-index: 1055; display: none;">
+    <div class="toast align-items-center text-white bg-danger border-0 show" role="alert">
+      <div class="d-flex">
+        <div class="toast-body" id="voicePopupMessage">
+          🎙️ Voice recording started. Please speak your transaction.
+        </div>
+        <button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="stopVoiceRecording()"></button>
+      </div>
+    </div>
+  </div>
+
 {% block scripts %}
 <script>
+    let recognition;
+  let isRecording = false;
+
+  const voiceBtn = document.getElementById("voiceTransactionBtn");
+
+  voiceBtn.addEventListener("click", () => {
+    if (!('webkitSpeechRecognition' in window)) {
+      alert("Sorry, your browser doesn't support voice recognition.");
+      return;
+    }
+
+    if (!isRecording) {
+      startVoiceRecording();
+    } else {
+      stopVoiceRecording();
+    }
+  });
+
+  function startVoiceRecording() {
+    recognition = new webkitSpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.start();
+    isRecording = true;
+    showVoicePopup("🎙️ Voice recording started. Please speak your transaction.");
+    voiceBtn.textContent = "🛑 Stop Recording";
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      console.log("Voice input:", transcript);
+
+      fetch("/voice_transaction", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ text: transcript })
+      })
+      .then(res => res.json())
+      .then(data => {
+        alert(data.message);
+        if (data.success) {
+          window.location.reload();
+        }
+      })
+      .catch(err => {
+        console.error("Error:", err);
+        alert("Failed to process voice input.");
+      })
+      .finally(() => {
+        stopVoiceRecording();
+      });
+    };
+
+    recognition.onerror = (event) => {
+      console.error("Speech error:", event.error);
+      alert("Voice recognition error: " + event.error);
+      stopVoiceRecording();
+    };
+  }
+
+  function stopVoiceRecording() {
+    if (recognition) {
+      recognition.stop();
+    }
+    isRecording = false;
+    hideVoicePopup();
+    voiceBtn.textContent = "🎙️ Add Expense by Voice";
+  }
+
+  function showVoicePopup(message) {
+    const popup = document.getElementById("voiceRecordingPopup");
+    document.getElementById("voicePopupMessage").textContent = message;
+    popup.style.display = "block";
+  }
+
+  function hideVoicePopup() {
+    document.getElementById("voiceRecordingPopup").style.display = "none";
+  }
 document.addEventListener('DOMContentLoaded', function() {
     const transactionModal = document.getElementById('transactionModal');
     const transactionForm = document.getElementById('transactionForm');
