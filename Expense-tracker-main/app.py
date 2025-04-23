@@ -16,7 +16,7 @@ from flask import request, jsonify
 import re
 from datetime import datetime
 import dateparser
-
+import json
 import traceback
 
 # Load environment variables
@@ -1158,6 +1158,174 @@ def voice_transaction():
             connection.close()
 
 
+
+def parse_gemini_suggestions(raw_suggestions):
+    """
+    Parse the suggestions from Gemini AI into a structured format.
+    
+    This function expects a JSON-like string or a Python dictionary
+    containing investment recommendations.
+    """
+    print("Starting to parse suggestions...")
+    if isinstance(raw_suggestions, str):
+        raw_suggestions = raw_suggestions.strip()
+    if raw_suggestions.startswith("```") and raw_suggestions.endswith("```"):
+        raw_suggestions = re.sub(r"^```(?:json)?\s*", "", raw_suggestions)
+        raw_suggestions = re.sub(r"\s*```$", "", raw_suggestions)
+    
+    # If raw_suggestions is empty or None
+    if not raw_suggestions:
+        print("Warning: Empty suggestions received")
+        return []
+    
+    try:
+        # If raw_suggestions is already a dictionary
+        if isinstance(raw_suggestions, dict):
+            suggestions_dict = raw_suggestions
+        # If raw_suggestions is a JSON string
+        elif isinstance(raw_suggestions, str):
+            # Try to parse as JSON
+            try:
+                suggestions_dict = json.loads(raw_suggestions)
+            except json.JSONDecodeError:
+                print("Warning: Could not parse suggestions as JSON")
+                # Create a basic structure with the raw text
+                return [{
+                    "heading": "Investment Recommendations",
+                    "subsections": [
+                        {
+                            "title": "AI Analysis",
+                            "content": raw_suggestions
+                        }
+                    ]
+                }]
+        else:
+            print(f"Warning: Unexpected suggestions type: {type(raw_suggestions)}")
+            return []
+        
+        # Convert to our expected format
+        parsed_suggestions = []
+        
+        # Handle different possible structures
+        if "suggestions" in suggestions_dict:
+            # Case 1: { "suggestions": [ {...}, {...} ] }
+            for section in suggestions_dict["suggestions"]:
+                parsed_section = {
+                    "heading": section.get("heading", "Investment Section"),
+                    "subsections": [],
+                    "chart_labels": section.get("chart_labels", []),     
+                    "chart_data": section.get("chart_data", []) 
+                }
+                
+                if "subsections" in section:
+                    parsed_section["subsections"] = section["subsections"]
+                elif "items" in section:
+                    parsed_section["subsections"] = section["items"]
+                else:
+                    # Try to extract key-value pairs as subsections
+                    for key, value in section.items():
+                        if key != "heading":
+                            if isinstance(value, dict):
+                                parsed_section["subsections"].append({
+                                    "title": key,
+                                    "amount": value.get("amount", ""),
+                                    "content": value.get("description", "")
+                                })
+                            else:
+                                parsed_section["subsections"].append({
+                                    "title": key,
+                                    "content": str(value)
+                                })
+                
+                parsed_suggestions.append(parsed_section)
+        elif isinstance(suggestions_dict, list):
+            # Case 2: [ {...}, {...} ]
+            for section in suggestions_dict:
+                if isinstance(section, dict):
+                    heading = section.get("heading", section.get("title", "Investment Section"))
+                    parsed_section = {
+                        "heading": heading,
+                        "subsections": [],
+                        "chart_labels": section.get("chart_labels", []),  
+                        "chart_data": section.get("chart_data", []) 
+                    }
+                    
+                    # Extract subsections
+                    if "subsections" in section:
+                        parsed_section["subsections"] = section["subsections"]
+                    elif "items" in section:
+                        parsed_section["subsections"] = section["items"]
+                    else:
+                        # Try to extract key-value pairs as subsections
+                        for key, value in section.items():
+                            if key not in ["heading", "title"]:
+                                if isinstance(value, dict):
+                                    parsed_section["subsections"].append({
+                                        "title": key,
+                                        "amount": value.get("amount", ""),
+                                        "content": value.get("description", "")
+                                    })
+                                else:
+                                    parsed_section["subsections"].append({
+                                        "title": key,
+                                        "content": str(value)
+                                    })
+                    
+                    parsed_suggestions.append(parsed_section)
+        else:
+            # Case 3: Single suggestion object
+            heading = suggestions_dict.get("heading", suggestions_dict.get("title", "Investment Recommendations"))
+            parsed_section = {
+                "heading": heading,
+                "subsections": [],
+                "chart_labels": section.get("chart_labels", []),    
+                "chart_data": section.get("chart_data", []) 
+            }
+            
+            # Extract subsections
+            if "subsections" in suggestions_dict:
+                parsed_section["subsections"] = suggestions_dict["subsections"]
+            elif "items" in suggestions_dict:
+                parsed_section["subsections"] = suggestions_dict["items"]
+            else:
+                # Try to extract key-value pairs as subsections
+                for key, value in suggestions_dict.items():
+                    if key not in ["heading", "title"]:
+                        if isinstance(value, dict):
+                            parsed_section["subsections"].append({
+                                "title": key,
+                                "amount": value.get("amount", ""),
+                                "content": value.get("description", "")
+                            })
+                        else:
+                            parsed_section["subsections"].append({
+                                "title": key,
+                                "content": str(value)
+                            })
+            
+            parsed_suggestions.append(parsed_section)
+        
+        print(f"Successfully parsed {len(parsed_suggestions)} suggestion sections")
+        return parsed_suggestions
+    
+    except Exception as e:
+        print(f"Error parsing suggestions: {str(e)}")
+        traceback.print_exc()
+        
+        # Return raw text as fallback
+        if isinstance(raw_suggestions, str):
+            return [{
+                "heading": "Investment Recommendations",
+                "subsections": [
+                    {
+                        "title": "AI Analysis",
+                        "content": raw_suggestions
+                    }
+                ]
+            }]
+        return []
+
+
 @app.route('/suggestions')
 @login_required
 def suggestions():
@@ -1178,7 +1346,6 @@ def suggestions():
         transactions = cursor.fetchall()
 
         # Save CSV
-        
         filename = f"transactions_{current_user.id}.csv"
         filepath = os.path.join("temp", filename)
         os.makedirs("temp", exist_ok=True)
@@ -1190,7 +1357,6 @@ def suggestions():
                 for tx in transactions:
                     writer.writerow([tx['amount'], tx['description'], tx['date'], tx['category']])
             print(f"CSV file saved to: {os.path.abspath(filepath)}")
-            print(f"CSV file exists: {os.path.exists(filepath)}")
         except Exception as e:
             print("CSV writing error:", str(e))
             flash("Failed to write transactions to CSV.", "danger")
@@ -1206,16 +1372,20 @@ def suggestions():
                 
         os.remove(filepath)  # Clean up
 
-        return render_template('suggestions.html', suggestions=suggestions)
+        suggestions_parsed = parse_gemini_suggestions(suggestions)
 
+        # No need for separate chart_configs, we'll include chart data directly in suggestions
+        return render_template("suggestions.html", suggestions=suggestions_parsed)
     except Exception as e:
         print("Error analyzing transactions:", str(e))
+        traceback.print_exc()
         flash("Failed to analyze transactions.", "danger")
         return redirect(url_for('transactions'))
     finally:
-        cursor.close()
-        connection.close()
-
+        if 'cursor' in locals():
+            cursor.close()
+        if connection:
+            connection.close()
 
 if __name__ == '__main__':
     app.run(debug=True) 

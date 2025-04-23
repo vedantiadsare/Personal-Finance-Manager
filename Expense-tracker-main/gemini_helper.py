@@ -1,6 +1,6 @@
 import google.generativeai as genai
 import os
-
+import re
 genai.configure(api_key="AIzaSyAJCBUsBaOQxW0uMW5J43Xs8RRfdr_jm5Y")
 model = genai.GenerativeModel('learnlm-2.0-flash-experimental')
 
@@ -8,27 +8,58 @@ def analyze_transactions_csv(file_path):
     with open(file_path, "r") as f:
         csv_content = f.read()
 
+    json_sample = """
+[
+  {
+    "heading": "Short-Term Investments",
+    "chart_labels": ["FDs"],
+    "chart_data": [29912],
+    "subsections": [
+      {
+        "title": "FDs (₹29,912)",
+        "content": "Provides stability and liquidity for emergency needs."
+      }
+    ]
+  }
+]
+"""
+
     prompt = f"""
-    Here's my monthly transaction data (CSV format):
+Here's my monthly transaction data in CSV format:
 
-    {csv_content}
+{csv_content}
 
-    
-        1. **Assume that I will continue to earn and spend the same way for the next few months.**
-        2. **My monthly salary is ₹100,000. My total expenses this month were ₹294 (₹100 grooming + ₹194 toll).**
-        3. This leaves me with a monthly surplus of ₹99,706.
+---
 
-        Please suggest a detailed investment plan tailored to this situation.
+Assume I will continue earning and spending in the same pattern.
 
-        **Be specific and include:**
-        - Exact rupee amounts or percentages to invest in different instruments like Fixed Deposits (FDs), Systematic Investment Plans (SIPs), Mutual Funds (equity/debt), Direct Equity, etc.
-        - Reasons for each investment choice based on surplus amount and low expenses.
-        - A simple breakdown of how I can divide my monthly surplus for short-term stability, medium-term goals, and long-term wealth generation.
-        - Consider that I am a moderate-risk investor who wants a balance between safety and returns.
-        - Format the answer cleanly with headings, bullet points, and clear amounts.
+### Objective:
+Generate a personalized investment plan based on this data. I am a moderate-risk investor seeking a balance between safety and returns.
 
-        Only respond with the analysis and investment recommendation. Do not include disclaimers or general investment theory.
-        """
+### Instructions:
+- Include exact rupee amounts or percentages for FDs, SIPs, Mutual Funds (equity/debt), and Direct Equity.
+- Break the plan into:
+  - Short-term stability(also suggest current mutual funds in india that are doing good, add 1 year returns in percent along with suggestions)
+  - Medium-term goals (3–5 years)
+  - Long-term wealth generation
+- For each section, give:
+  - A heading
+  - A pie chart structure: `chart_labels` and `chart_data`
+  - A `subsections` list with investment titles and short explanations
+
+### Output format:
+Return only a raw JSON array. No explanations, markdown, or backticks. Output should look exactly like:
+
+{json_sample}
+"""
+
+
 
     response = model.generate_content(prompt)
-    return response.text
+    response_text = response.text.strip()
+
+    # Strip triple backticks and language tags if present
+    response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+    response_text = re.sub(r"\s*```$", "", response_text)
+
+    return response_text
